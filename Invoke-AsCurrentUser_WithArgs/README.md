@@ -3,7 +3,7 @@
 A PowerShell module for executing scripts in the context of the currently logged-in user from a SYSTEM context.
 
 [![PowerShell Gallery](https://img.shields.io/powershellgallery/v/Invoke-AsCurrentUser_WithArgs)](https://www.powershellgallery.com/packages/Invoke-AsCurrentUser_WithArgs)
-[![License](https://img.shields.io/github/license/Harze2k/Shared-PowerShell-Modules/Invoke-AsCurrentUser_WithArgs/LICENSE)](LICENSE)
+[![License](https://img.shields.io/github.com/Harze2k/Shared-PowerShell-Modules/blob/main/Invoke-AsCurrentUser_WithArgs/LICENSE)](LICENSE)
 
 ## Overview
 
