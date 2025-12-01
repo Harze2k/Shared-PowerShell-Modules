@@ -36,7 +36,7 @@
             # Tags applied to this module for module discovery
             Tags                       = @('RunAsUser', 'Intune', 'SCCM', 'SYSTEM', 'UserContext', 'Deployment', 'Windows')
             # License URI
-            LicenseUri                 = 'https://github.com/Harze2k/Shared-PowerShell-Modules/Invoke-AsCurrentUser_WithArgs/LICENSE'
+            LicenseUri                 = 'https://github.com/Harze2k/Shared-PowerShell-Modules/blob/main/LICENSE'
             # Project URI
             ProjectUri                 = 'https://github.com/Harze2k/Shared-PowerShell-Modules/Invoke-AsCurrentUser_WithArgs'
             # Icon URI
