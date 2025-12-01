@@ -4,7 +4,7 @@ A PowerShell module for executing scripts in the context of the currently logged
 
 [![PowerShell Gallery](https://img.shields.io/powershellgallery/v/Invoke-AsCurrentUser_WithArgs)](https://www.powershellgallery.com/packages/Invoke-AsCurrentUser_WithArgs)
 [![Module Downloads](https://img.shields.io/powershellgallery/dt/Invoke-AsCurrentUser_WithArgs)](https://www.powershellgallery.com/packages/Invoke-AsCurrentUser_WithArgs)
-[![License](https://img.shields.io/github/license/Harze2k/Shared-PowerShell-Modules)](https://github.com/Harze2k/Shared-PowerShell-Modules/blob/main/LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/Harze2k/Shared-PowerShell-Modules/blob/main/LICENSE)
 
 ## Overview
 
