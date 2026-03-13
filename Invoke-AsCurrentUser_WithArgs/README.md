@@ -13,7 +13,7 @@ This module provides functionality to execute PowerShell scriptblocks as the cur
 - **Intune/MEM deployments** that need user-context operations
 - **SCCM task sequences** requiring user interaction or access
 - **Scheduled tasks** running as SYSTEM that need user-specific operations
-- **Any SYSTEM-level process** needing to perform uAser-specific operations
+- **Any SYSTEM-level process** needing to perform user-specific operations
 
 ## Features
 

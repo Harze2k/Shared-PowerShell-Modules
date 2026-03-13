@@ -5,6 +5,7 @@
     This module provides functionality to execute PowerShell scriptblocks as the currently
     logged-in user from a SYSTEM context (such as during Intune deployments, SCCM task sequences,
     or scheduled tasks running as SYSTEM).
+
     Key features:
     - Execute scriptblocks as the interactive user session
     - Pass arguments/variables to the remote scriptblock
@@ -12,9 +13,10 @@
     - Support for both Windows PowerShell 5.1 and PowerShell 7+
     - Configurable timeout handling
     - Optional stream capture (stdout/stderr)
+    - Non-terminating error handling (no throw statements) to prevent script interruption
 .NOTES
     Author: Martin
-    Version: 1.0.0
+    Version: 1.1.0
     Requires: Windows PowerShell 5.1 or PowerShell 7+
     Requires: Running as SYSTEM or with SeDelegateSessionUserImpersonatePrivilege
 .LINK
@@ -29,7 +31,8 @@ function Get-RunAsUserCSharpSource {
     .DESCRIPTION
         This function returns the C# source code required for creating processes
         in the context of the currently logged-in user. The code handles token
-        manipulation, environment block creation, and process creation.
+        manipulation, environment block creation, and process creation using
+        Windows API calls (WTSQueryUserToken, CreateProcessAsUserW, etc.).
     .OUTPUTS
         System.String
         Returns the C# source code as a string.
@@ -39,6 +42,7 @@ function Get-RunAsUserCSharpSource {
         Compiles the C# code and makes the RunAsUser.ProcessExtensions class available.
     .NOTES
         This is an internal function used by Invoke-AsCurrentUser_WithArgs.
+        The C# code includes handle management with SafeHandle wrappers for proper cleanup.
     #>
     [CmdletBinding()]
     [OutputType([string])]
@@ -314,15 +318,18 @@ function Serialize-Object {
         Converts PowerShell objects to JSON strings with support for complex types
         including ScriptBlocks, nested hashtables, and circular reference detection.
         Works consistently across PowerShell 5.1 and PowerShell 7+.
+
+        On failure, writes a non-terminating error and returns $null instead of throwing.
     .PARAMETER Data
         The object to serialize. Accepts pipeline input.
     .PARAMETER Path
         Optional file path to save the serialized JSON. If not specified, returns the JSON string.
+        Parent directories are created automatically if they do not exist.
     .PARAMETER Depth
-        Maximum depth for nested object serialization. Default is 20.
+        Maximum depth for nested object serialization. Default is 20. Valid range: 1-100.
     .OUTPUTS
         System.String
-        Returns the JSON string if Path is not specified.
+        Returns the JSON string if Path is not specified. Returns $null on failure.
     .EXAMPLE
         $data = @{ Name = "Test"; Value = 123 }
         $json = $data | Serialize-Object
@@ -416,16 +423,16 @@ function Serialize-Object {
                 return $ht
             }
             if ($InputObject -is [System.Collections.IEnumerable] -and $InputObject -isnot [string] -and $InputObject -isnot [System.Collections.IDictionary]) {
-                $collection = @()
+                $collection = [System.Collections.Generic.List[object]]::new()
                 try {
                     foreach ($item in $InputObject) {
-                        $collection += ConvertTo-PlainObject -InputObject $item -CurrentDepth ($CurrentDepth + 1) -ProcessedObjects $ProcessedObjects
+                        $collection.Add((ConvertTo-PlainObject -InputObject $item -CurrentDepth ($CurrentDepth + 1) -ProcessedObjects $ProcessedObjects))
                     }
                 }
                 catch {
                     Write-Verbose "Error processing collection: $($_.Exception.Message)"
                 }
-                return $collection
+                return @(, $collection.ToArray())
             }
             return $InputObject
         }
@@ -437,11 +444,11 @@ function Serialize-Object {
         try {
             $plainObject = ConvertTo-PlainObject -InputObject $Data -CurrentDepth 0 -ProcessedObjects $null
             if ($PSVersionTable.PSVersion.Major -ge 6) {
-                $jsonString = $plainObject | ConvertTo-Json -Depth $Depth -Compress -ErrorAction Stop
+                $jsonString = ConvertTo-Json -InputObject $plainObject -Depth $Depth -Compress -ErrorAction Stop
             }
             else {
                 try {
-                    $jsonString = $plainObject | ConvertTo-Json -Depth $Depth -Compress -ErrorAction Stop
+                    $jsonString = ConvertTo-Json -InputObject $plainObject -Depth $Depth -Compress -ErrorAction Stop
                 }
                 catch {
                     Write-Verbose "ConvertTo-Json failed, using manual JSON serialization: $($_.Exception.Message)"
@@ -465,7 +472,8 @@ function Serialize-Object {
             }
         }
         catch {
-            throw "Serialization failed: $($_.Exception.Message)"
+            Write-Error "Serialization failed: $($_.Exception.Message)"
+            return $null
         }
     }
 }
@@ -477,13 +485,17 @@ function Deserialize-Object {
         Converts JSON strings or files back to PowerShell objects, reconstructing
         special types like ScriptBlocks that were serialized with Serialize-Object.
         Works consistently across PowerShell 5.1 and PowerShell 7+.
+
+        On failure, writes a non-terminating error and returns $null instead of throwing.
+        When -Path is specified and the file does not exist, writes an error and returns $null.
     .PARAMETER Data
         JSON string to deserialize. Accepts pipeline input.
     .PARAMETER Path
-        Path to a JSON file to deserialize.
+        Path to a JSON file to deserialize. If the file does not exist, an error is written
+        and $null is returned.
     .OUTPUTS
         System.Object
-        Returns the deserialized object (hashtable, array, or primitive type).
+        Returns the deserialized object (hashtable, array, or primitive type). Returns $null on failure.
     .EXAMPLE
         $json = '{"Name":"Test","Value":123}'
         $object = $json | Deserialize-Object
@@ -510,7 +522,8 @@ function Deserialize-Object {
         try {
             $jsonInput = if ($Path) {
                 if (-not (Test-Path -Path $Path)) {
-                    throw "File not found: $Path"
+                    Write-Error "File not found: $Path"
+                    return $null
                 }
                 Get-Content -Path $Path -Raw -ErrorAction Stop
             }
@@ -584,11 +597,11 @@ function Deserialize-Object {
                     return $ht
                 }
                 if ($InputObject -is [System.Collections.IEnumerable] -and $InputObject -isnot [string] -and $InputObject -isnot [System.Collections.IDictionary]) {
-                    $newList = @()
+                    $newList = [System.Collections.Generic.List[object]]::new()
                     foreach ($item in $InputObject) {
-                        $newList += Reconstruct-Object -InputObject $item
+                        $newList.Add((Reconstruct-Object -InputObject $item))
                     }
-                    return $newList
+                    return @(, $newList.ToArray())
                 }
                 if ($InputObject -is [Int64]) {
                     # Convert Int64 to Int32 if within range
@@ -601,7 +614,8 @@ function Deserialize-Object {
             return Reconstruct-Object -InputObject $deserializedObject
         }
         catch {
-            throw "Failed to deserialize JSON data. Error: $($_.Exception.Message)"
+            Write-Error "Failed to deserialize JSON data. Error: $($_.Exception.Message)"
+            return $null
         }
     }
 }
@@ -610,7 +624,7 @@ function Deserialize-Object {
 function Invoke-AsCurrentUser_WithArgs {
     <#
     .SYNOPSIS
-        Executes a PowerShell scriptblock in the context of the currently logged-in user.
+        Executes a PowerShell scriptblock in the context of the currently logged-in user from a SYSTEM process.
     .DESCRIPTION
         This function allows execution of PowerShell code as the interactive user session
         when running from a SYSTEM context. This is particularly useful for:
@@ -618,18 +632,23 @@ function Invoke-AsCurrentUser_WithArgs {
         - SCCM task sequences requiring user interaction
         - Scheduled tasks running as SYSTEM that need user access
         - Any SYSTEM-level process needing to perform user-specific operations
+
         The function creates a new PowerShell process in the user's session, executes
         the provided scriptblock, captures output via transcript, and returns results
         in a structured format.
+
+        v1.1 uses non-terminating errors (Write-Error) instead of throw statements,
+        ensuring that calling scripts are never interrupted by this module.
     .PARAMETER ScriptBlock
         The PowerShell scriptblock to execute in the user's context. This is the code
         that will run as the logged-in user.
     .PARAMETER Argument
         A hashtable of variables to pass to the scriptblock. These will be available
-        as variables within the scriptblock's scope.
+        as variables within the scriptblock's scope. Keys become variable names.
     .PARAMETER TimeoutSeconds
         Maximum time in seconds to wait for script completion. Default is 60 seconds.
-        After timeout, the process is terminated and an error is thrown.
+        Valid range: 1-3600 (1 hour). After timeout, the process is terminated and
+        a structured error result is returned.
     .PARAMETER ReturnTranscript
         When specified, returns the full result object including transcript data.
         Cannot be used with -NoWait.
@@ -661,24 +680,25 @@ function Invoke-AsCurrentUser_WithArgs {
         Cannot be used with -NoWait.
     .PARAMETER WorkingDirectory
         Sets the working directory for the scriptblock execution.
-        Defaults to the PowerShell executable's directory.
+        Defaults to the PowerShell executable's directory. Must be an existing directory.
     .PARAMETER CleanTemp
         Removes the temporary directory after execution. Use with caution as this
         removes all files in the temp path used by this function.
     .OUTPUTS
         System.Object
-        By default, returns the scriptblock's output.
+        By default, returns the scriptblock's output (the Result property value).
         With -ReturnPSCustomObject or -ReturnHashTable, returns a structured result containing:
         - Result: The scriptblock's return value
         - Status: "Success" or "Failed"
         - ExecutionSuccess: Boolean indicating successful execution
         - Transcript: Parsed transcript object (with -ReturnTranscript)
         - ErrorMessage: Error details if execution failed
-        - StdOut: Output stream content (with -CaptureStreams)
-        - StdErr: Error stream content (with -CaptureStreams)
-        - Warnings: Warning stream content (with -CaptureStreams)
-        - Verbose: Verbose stream content (with -CaptureStreams)
+        - StdOut: Output stream content (with -CaptureStreams, empty string if none)
+        - StdErr: Error stream content (with -CaptureStreams, empty string if none)
+        - Warnings: Warning stream content (with -CaptureStreams, empty string if none)
+        - Verbose: Verbose stream content (with -CaptureStreams, empty string if none)
         - ProcessId: The spawned process ID (with -NoWait)
+        Returns $null on critical failures (privilege check, temp path creation, serialization).
     .EXAMPLE
         Invoke-AsCurrentUser_WithArgs -ScriptBlock { Get-Process | Select-Object -First 5 }
         Executes Get-Process as the current user and returns the first 5 processes.
@@ -739,10 +759,12 @@ function Invoke-AsCurrentUser_WithArgs {
         - Must be running as SYSTEM or with SeDelegateSessionUserImpersonatePrivilege
         - A user must be logged in with an active session
         - Windows only (uses Windows-specific APIs)
+
         Limitations:
         - Cannot interact with UAC prompts
         - GUI operations require -Visible switch
         - Large data transfers may hit serialization limits
+
         Security Considerations:
         - Scripts run with the user's full permissions
         - Sensitive data in arguments is written to temp files briefly
@@ -765,7 +787,7 @@ function Invoke-AsCurrentUser_WithArgs {
         [Parameter()][switch]$CaptureStreams,
         [Parameter()][ValidateNotNull()][hashtable]$Argument,
         [Parameter()][ValidateRange(1, 3600)][int]$TimeoutSeconds = 60,
-        [Parameter()][ValidateScript({ $_ -eq $null -or $_ -eq '' -or (Test-Path -Path $_ -PathType Container) })][string]$WorkingDirectory = $null,
+        [Parameter()][string]$WorkingDirectory,
         [Parameter()][switch]$CleanTemp
     )
     #region Configuration Constants
@@ -790,7 +812,11 @@ function Invoke-AsCurrentUser_WithArgs {
     function Test-SystemPrivileges {
         <#
         .SYNOPSIS
-            Tests if the current process has sufficient privileges to run as another user.
+            Tests if the current process has SYSTEM-level or impersonation privileges.
+        .DESCRIPTION
+            Checks whether the current process is running as NT AUTHORITY\SYSTEM,
+            as an Administrator, or has the SeDelegateSessionUserImpersonatePrivilege
+            privilege enabled. Returns $true if any of these conditions are met.
         #>
         [CmdletBinding()]
         [OutputType([bool])]
@@ -825,13 +851,16 @@ function Invoke-AsCurrentUser_WithArgs {
     function Get-SafeTempPath {
         <#
         .SYNOPSIS
-            Gets or creates a safe temporary directory path for script execution.
+            Gets or creates a safe temporary directory path for script execution files.
+        .DESCRIPTION
+            Attempts to find or create a writable temporary directory from a list of
+            candidate paths. Tests write access by creating and removing a test file.
+            Returns $null and writes an error if no suitable path can be found.
         #>
         [CmdletBinding()]
         [OutputType([string])]
         param()
         $possiblePaths = @(
-            #"$env:SystemDrive\Temp\Intune\Scripts\Winget\Logs\UserInvoke",
             "$env:SystemRoot\Temp\UserInvoke",
             "$env:ProgramData\UserInvoke\Temp"
         )
@@ -846,16 +875,21 @@ function Invoke-AsCurrentUser_WithArgs {
                 return $path
             }
             catch {
-                Write-Error "Cannot use path $path : $($_.Exception.Message)"
+                Write-Verbose "Cannot use path $path : $($_.Exception.Message)"
                 continue
             }
         }
-        throw "Could not find or create a suitable temporary directory"
+        Write-Error "Could not find or create a suitable temporary directory. Tried: $($possiblePaths -join ', ')"
+        return $null
     }
     function ConvertFrom-PowerShellTranscript {
         <#
         .SYNOPSIS
-            Parses a PowerShell transcript file into a structured object.
+            Parses a PowerShell transcript file into a structured PSCustomObject.
+        .DESCRIPTION
+            Reads a PowerShell transcript log file and extracts header metadata
+            (StartTime, Username, MachineName, etc.) and the transcript body content.
+            Returns $null if the file does not exist or cannot be read.
         #>
         [CmdletBinding()]
         [OutputType([PSCustomObject])]
@@ -865,7 +899,7 @@ function Invoke-AsCurrentUser_WithArgs {
         process {
             if (-not (Test-Path -Path $TranscriptPath)) {
                 Write-Error "Transcript file not found: $TranscriptPath"
-                return
+                return $null
             }
             $transcriptData = @{
                 StartTime         = $null
@@ -941,7 +975,7 @@ function Invoke-AsCurrentUser_WithArgs {
             }
             catch {
                 Write-Error "Error reading transcript file: $($_.Exception.Message)"
-                return
+                return $null
             }
             finally {
                 if ($reader) {
@@ -949,10 +983,10 @@ function Invoke-AsCurrentUser_WithArgs {
                 }
             }
             $transcriptData.TranscriptContent = $transcriptContent -join "`n"
-            $missingFields = @()
+            $missingFields = [System.Collections.Generic.List[string]]::new()
             foreach ($key in $transcriptData.Keys) {
                 if ($key -ne 'TranscriptContent' -and $key -ne 'TranscriptPath' -and $null -eq $transcriptData[$key]) {
-                    $missingFields += $key
+                    $missingFields.Add($key)
                 }
             }
             if ($missingFields.Count -gt 0) {
@@ -964,8 +998,17 @@ function Invoke-AsCurrentUser_WithArgs {
     function Invoke-InternalAsCurrentUser {
         <#
         .SYNOPSIS
-            Internal implementation that handles the actual process creation and execution.
+            Internal implementation that handles process creation and execution as the logged-in user.
+        .DESCRIPTION
+            Builds a wrapped PowerShell script, launches it in the user's session via
+            the RunAsUser C# interop, waits for completion (or handles timeout/NoWait),
+            then parses and returns structured results. Returns a PSCustomObject with
+            Result, Transcript, Status, ExecutionSuccess, and optionally stream capture data.
+            All errors are handled as non-terminating (Write-Error + return).
         #>
+        # Note: This function also accesses $UseWindowsPowerShell, $NoWait, $Visible, and
+        # $NonElevatedSession from the parent scope (Invoke-AsCurrentUser_WithArgs parameters).
+        # This is intentional — they are read-only and always available via PowerShell dynamic scoping.
         [CmdletBinding()]
         param(
             [string]$TempPath,
@@ -983,7 +1026,14 @@ function Invoke-AsCurrentUser_WithArgs {
             }
             catch {
                 if ($_.Exception.Message -notmatch "already exists") {
-                    throw $_
+                    Write-Error "Failed to compile RunAsUser C# code: $($_.Exception.Message)"
+                    return [pscustomobject]@{
+                        Result           = $null
+                        Transcript       = $null
+                        Status           = "Failed"
+                        ExecutionSuccess = $false
+                        ErrorMessage     = "Failed to compile RunAsUser C# code: $($_.Exception.Message)"
+                    }
                 }
             }
         }
@@ -1044,7 +1094,13 @@ $verboseContent = $null
         [void]$wrappedScriptBuilder.AppendLine("            `$scriptData = `$serializer.DeserializeObject(`$rawData)")
         [void]$wrappedScriptBuilder.AppendLine("        }")
         [void]$wrappedScriptBuilder.AppendLine("    }")
-        [void]$wrappedScriptBuilder.AppendLine("    else { throw }")
+        [void]$wrappedScriptBuilder.AppendLine("    else {")
+        [void]$wrappedScriptBuilder.AppendLine("        `$deserializeError = `$_.Exception.Message")
+        [void]$wrappedScriptBuilder.AppendLine("        Try { Stop-Transcript -ErrorAction SilentlyContinue } Catch { }")
+        [void]$wrappedScriptBuilder.AppendLine("        '{`"Result`":null,`"ExecutionSuccess`":false,`"ErrorMessage`":`"Deserialization failed in child process`"}' | Out-File `"$TempPath\result.json`" -Encoding UTF8 -Force")
+        [void]$wrappedScriptBuilder.AppendLine("        [System.IO.File]::WriteAllText(`"$TempPath\result.json.complete`", `"done`")")
+        [void]$wrappedScriptBuilder.AppendLine("        return")
+        [void]$wrappedScriptBuilder.AppendLine("    }")
         [void]$wrappedScriptBuilder.AppendLine("}")
         [void]$wrappedScriptBuilder.AppendLine("`$variables = `$scriptData.Argument")
         [void]$wrappedScriptBuilder.AppendLine("if(`$scriptData.ScriptBlock) {")
@@ -1141,21 +1197,28 @@ $verboseContent = $null
         [void]$wrappedScriptBuilder.AppendLine("    [System.IO.File]::WriteAllText(`"$TempPath\result.json.complete`", `"done`")")
         [void]$wrappedScriptBuilder.AppendLine("}")
         [void]$wrappedScriptBuilder.AppendLine("catch {")
-        [void]$wrappedScriptBuilder.AppendLine("    `"{'Result':'Error','ExecutionSuccess':false,'ErrorMessage':'Serialization failed'}`" | Out-File `"$TempPath\result.json`" -Encoding UTF8 -Force")
+        [void]$wrappedScriptBuilder.AppendLine("    '{`"Result`":`"Error`",`"ExecutionSuccess`":false,`"ErrorMessage`":`"Serialization failed`"}' | Out-File `"$TempPath\result.json`" -Encoding UTF8 -Force")
         [void]$wrappedScriptBuilder.AppendLine("    [System.IO.File]::WriteAllText(`"$TempPath\result.json.complete`", `"done`")")
         [void]$wrappedScriptBuilder.AppendLine("}")
         $wrappedScript = $wrappedScriptBuilder.ToString()
         #endregion Build Wrapped Script
         #region Execute Process
         try {
-            $pwshPath = if ($UseWindowsPowerShell) {
+            $pwshPath = if ($UseWindowsPowerShell.IsPresent) {
                 "$($ENV:windir)\system32\WindowsPowerShell\v1.0\powershell.exe"
             }
             else {
                 (Get-Process -Id $PID).Path
             }
             if (-not (Test-Path $pwshPath)) {
-                throw "PowerShell executable not found at: $pwshPath"
+                Write-Error "PowerShell executable not found at: $pwshPath"
+                return [pscustomobject]@{
+                    Result           = $null
+                    Transcript       = $null
+                    Status           = "Failed"
+                    ExecutionSuccess = $false
+                    ErrorMessage     = "PowerShell executable not found at: $pwshPath"
+                }
             }
             $pwshCommand = ""
             $scriptPath = $null
@@ -1188,7 +1251,7 @@ $verboseContent = $null
                 $workDir,
                 $Visible.IsPresent,
                 $timeoutMs,
-                !$NonElevatedSession
+                !$NonElevatedSession.IsPresent
             )
             $processId = $result.ProcessId
             Write-Verbose "Started process with ID: $processId"
@@ -1202,7 +1265,15 @@ $verboseContent = $null
                 }
             }
             if ($result.TimedOut) {
-                throw "Timeout waiting for script execution after $TimeoutSeconds seconds"
+                Write-Error "Timeout waiting for script execution after $TimeoutSeconds seconds."
+                return [pscustomobject]@{
+                    Result           = $null
+                    Transcript       = $null
+                    Status           = "Failed"
+                    ExecutionSuccess = $false
+                    ErrorMessage     = "Timeout waiting for script execution after $TimeoutSeconds seconds"
+                    ProcessId        = $processId
+                }
             }
             #region Wait for Completion
             $timer = [System.Diagnostics.Stopwatch]::StartNew()
@@ -1225,48 +1296,76 @@ $verboseContent = $null
                             Write-Verbose "Could not kill process: $($_.Exception.Message)"
                         }
                     }
-                    throw "Timeout waiting for script execution after $TimeoutSeconds seconds"
+                    Write-Error "Timeout waiting for result file after $TimeoutSeconds seconds (buffer: $($script:MAX_WAIT_BUFFER_SECONDS)s)."
+                    return [pscustomobject]@{
+                        Result           = $null
+                        Transcript       = $null
+                        Status           = "Failed"
+                        ExecutionSuccess = $false
+                        ErrorMessage     = "Timeout waiting for result file after $TimeoutSeconds seconds"
+                        ProcessId        = $processId
+                    }
                 }
             }
             #endregion Wait for Completion
             if (-not (Test-Path $resultPath)) {
-                throw "Completion marker found but result.json is missing"
+                Write-Error "Completion marker found but result.json is missing at: $resultPath"
+                return [pscustomobject]@{
+                    Result           = $null
+                    Transcript       = $null
+                    Status           = "Failed"
+                    ExecutionSuccess = $false
+                    ErrorMessage     = "Completion marker found but result.json is missing"
+                }
             }
             #region Parse Results
+            $transcript = $null
+            $resultData = $null
             try {
                 $transcript = ConvertFrom-PowerShellTranscript -TranscriptPath "$TempPath\Invoke-AsCurrentUser_WithArgs.log"
                 $retryCount = 0
-                $resultData = $null
                 $retryDelay = $script:INITIAL_RETRY_DELAY_MS
                 while ($retryCount -lt $script:MAX_RETRIES) {
-                    try {
-                        $resultData = Deserialize-Object -Path $resultPath
+                    $resultData = Deserialize-Object -Path $resultPath
+                    if ($null -ne $resultData) {
                         break
                     }
-                    catch {
-                        $retryCount++
-                        if ($retryCount -ge $script:MAX_RETRIES) {
-                            throw "Failed to parse execution results after $($script:MAX_RETRIES) attempts: $($_.Exception.Message)"
+                    $retryCount++
+                    if ($retryCount -ge $script:MAX_RETRIES) {
+                        Write-Error "Failed to parse execution results after $($script:MAX_RETRIES) attempts."
+                        return [pscustomobject]@{
+                            Result           = $null
+                            Transcript       = $transcript
+                            Status           = "Failed"
+                            ExecutionSuccess = $false
+                            ErrorMessage     = "Failed to parse execution results after $($script:MAX_RETRIES) attempts"
                         }
-                        Write-Verbose "Retry $retryCount : JSON parse failed, retrying..."
-                        Start-Sleep -Milliseconds $retryDelay
-                        $retryDelay *= 2
                     }
+                    Write-Verbose "Retry $retryCount : JSON parse returned null, retrying in $retryDelay ms..."
+                    Start-Sleep -Milliseconds $retryDelay
+                    $retryDelay *= 2
                 }
-                $random = Get-Random # Backup logs
-                Copy-Item -Path "$TempPath\Invoke-AsCurrentUser_WithArgs.log" -Destination "$TempPath\Invoke-AsCurrentUser_WithArgs_Old_$random.log" -ErrorAction SilentlyContinue
-                Copy-Item -Path $resultPath -Destination "$TempPath\Invoke-AsCurrentUser_WithArgs_Old_$random.json" -ErrorAction SilentlyContinue
+                $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+                Copy-Item -Path "$TempPath\Invoke-AsCurrentUser_WithArgs.log" -Destination "$TempPath\Invoke-AsCurrentUser_WithArgs_Old_$timestamp.log" -ErrorAction SilentlyContinue
+                Copy-Item -Path $resultPath -Destination "$TempPath\Invoke-AsCurrentUser_WithArgs_Old_$timestamp.json" -ErrorAction SilentlyContinue
             }
             catch {
-                throw "Failed to parse execution results: $($_.Exception.Message)"
+                Write-Error "Failed to parse execution results: $($_.Exception.Message)"
+                return [pscustomobject]@{
+                    Result           = $null
+                    Transcript       = $transcript
+                    Status           = "Failed"
+                    ExecutionSuccess = $false
+                    ErrorMessage     = "Failed to parse execution results: $($_.Exception.Message)"
+                }
             }
             #endregion Parse Results
             #region Determine Status
             $Status = "Failed"
             if ($resultData) {
-                if ($resultData['ExecutionSuccess']) {
+                if ($resultData.ContainsKey('ExecutionSuccess')) {
                     $Status = if ($resultData.ExecutionSuccess -eq $true) { "Success" } else { "Failed" }
-                    if ($Status -eq "Failed" -and $resultData.ErrorMessage) {
+                    if ($Status -eq "Failed" -and $resultData.ContainsKey('ErrorMessage') -and $resultData.ErrorMessage) {
                         Write-Verbose "Execution failed with error: $($resultData.ErrorMessage)"
                     }
                 }
@@ -1311,21 +1410,19 @@ $verboseContent = $null
             #endregion Cleanup
             #region Build Result Object
             $resultObject = @{
-                Result     = $resultData.Result
-                Transcript = $transcript
-                Status     = $Status
+                Result           = $resultData.Result
+                Transcript       = $transcript
+                Status           = $Status
+                ExecutionSuccess = if ($resultData.ContainsKey('ExecutionSuccess')) { $resultData.ExecutionSuccess } else { $Status -eq "Success" }
             }
-            if ($resultData['ExecutionSuccess']) {
-                $resultObject.ExecutionSuccess = $resultData.ExecutionSuccess
-            }
-            if ($resultData['ErrorMessage'] -and $resultData.ErrorMessage) {
+            if ($resultData.ContainsKey('ErrorMessage') -and $resultData.ErrorMessage) {
                 $resultObject.ErrorMessage = $resultData.ErrorMessage
             }
             if ($IsCaptureStreams) {
-                if ($resultData['StdOut']) { $resultObject.StdOut = $resultData.StdOut }
-                if ($resultData['StdErr']) { $resultObject.StdErr = $resultData.StdErr }
-                if ($resultData['Warnings']) { $resultObject.Warnings = $resultData.Warnings }
-                if ($resultData['Verbose']) { $resultObject.Verbose = $resultData.Verbose }
+                $resultObject.StdOut = if ($resultData.ContainsKey('StdOut')) { $resultData.StdOut } else { "" }
+                $resultObject.StdErr = if ($resultData.ContainsKey('StdErr')) { $resultData.StdErr } else { "" }
+                $resultObject.Warnings = if ($resultData.ContainsKey('Warnings')) { $resultData.Warnings } else { "" }
+                $resultObject.Verbose = if ($resultData.ContainsKey('Verbose')) { $resultData.Verbose } else { "" }
             }
             return [pscustomobject]$resultObject
             #endregion Build Result Object
@@ -1334,20 +1431,13 @@ $verboseContent = $null
             if ($scriptPath -and (Test-Path $scriptPath)) {
                 Remove-Item $scriptPath -Force -ErrorAction SilentlyContinue
             }
-            if ($_.Exception.Message -match "Timeout") {
-                throw
-            }
-            $errorResult = @{
-                Result     = $null
-                Transcript = $null
-                Status     = "Failed"
-                Error      = $_.Exception.Message
-            }
-            if ($ReturnPSCustomObject.IsPresent) {
-                return [pscustomobject]$errorResult
-            }
-            else {
-                return $errorResult
+            Write-Error "Process execution failed: $($_.Exception.Message)"
+            return [pscustomobject]@{
+                Result           = $null
+                Transcript       = $null
+                Status           = "Failed"
+                ExecutionSuccess = $false
+                ErrorMessage     = $_.Exception.Message
             }
         }
         #endregion Execute Process
@@ -1355,23 +1445,31 @@ $verboseContent = $null
     #endregion Internal Functions
     #region Parameter Validation
     if ($ReturnTranscript -and $NoWait) {
-        Write-Warning "Cannot return transcript when NoWait is specified"
-        return
+        Write-Error "Cannot return transcript when -NoWait is specified. These parameters are mutually exclusive."
+        return $null
     }
     if ($CaptureStreams -and $NoWait) {
-        Write-Warning "Cannot capture streams when NoWait is specified"
-        return
+        Write-Error "Cannot capture streams when -NoWait is specified. These parameters are mutually exclusive."
+        return $null
+    }
+    if ($WorkingDirectory -and -not (Test-Path -Path $WorkingDirectory -PathType Container)) {
+        Write-Error "WorkingDirectory does not exist or is not a directory: $WorkingDirectory"
+        return $null
     }
     #endregion Parameter Validation
     #region Privilege Check
     if (-not (Test-SystemPrivileges)) {
-        Write-Warning "Insufficient privileges. You must run this script as SYSTEM or with SeDelegateSessionUserImpersonatePrivilege."
-        return
+        Write-Error "Insufficient privileges. You must run this script as SYSTEM or with SeDelegateSessionUserImpersonatePrivilege."
+        return $null
     }
     #endregion Privilege Check
     #region Main Execution
     try {
         $tempPath = Get-SafeTempPath
+        if ($null -eq $tempPath) {
+            # Get-SafeTempPath already wrote the error
+            return $null
+        }
         $scriptData = @{
             ScriptBlock = $ScriptBlock.ToString()
         }
@@ -1379,6 +1477,10 @@ $verboseContent = $null
             $scriptData.Argument = $Argument
         }
         $serializedData = Serialize-Object -Data $scriptData
+        if ($null -eq $serializedData) {
+            Write-Error "Failed to serialize script data. Cannot proceed with execution."
+            return $null
+        }
         $result = Invoke-InternalAsCurrentUser `
             -TempPath $tempPath `
             -SerializedData $serializedData `
@@ -1389,7 +1491,7 @@ $verboseContent = $null
             -IsCaptureStreams $CaptureStreams.IsPresent `
             -Verbose:$VerbosePreference
         if ($null -eq $result) {
-            return
+            return $null
         }
         if ($NoWait) {
             return $result
@@ -1415,12 +1517,8 @@ $verboseContent = $null
         }
     }
     catch {
-        $errorMsg = $_.Exception.Message
-        if ($errorMsg -match "Timeout") {
-            throw $_
-        }
-        Write-Error "Failed to execute script as current user: $errorMsg"
-        return "Failed to execute script as current user: $errorMsg"
+        Write-Error "Failed to execute script as current user: $($_.Exception.Message)"
+        return $null
     }
     finally {
         if ($CleanTemp.IsPresent -and $tempPath -and (Test-Path $tempPath)) {

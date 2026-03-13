@@ -2,7 +2,7 @@
     # Script module file associated with this manifest
     RootModule           = 'Invoke-AsCurrentUser_WithArgs.psm1'
     # Version number
-    ModuleVersion        = '1.0.0'
+    ModuleVersion        = '1.1.0'
     # Supported PSEditions
     CompatiblePSEditions = @('Desktop', 'Core')
     # ID used to uniquely identify this module
@@ -12,9 +12,9 @@
     # Company or vendor
     CompanyName          = 'Community'
     # Copyright statement
-    Copyright            = '(c) 2025. All rights reserved.'
+    Copyright            = '(c) 2025-2026. All rights reserved.'
     # Description
-    Description          = 'Execute PowerShell scriptblocks in the context of the currently logged-in user from a SYSTEM context. Ideal for Intune deployments, SCCM task sequences, and scheduled tasks.'
+    Description          = 'Execute PowerShell scriptblocks in the context of the currently logged-in user from a SYSTEM context. Ideal for Intune deployments, SCCM task sequences, and scheduled tasks. Supports argument passing, transcript capture, stream capture, and configurable timeouts.'
     # Minimum PowerShell version required
     PowerShellVersion    = '5.1'
     # Functions to export from this module
@@ -43,6 +43,18 @@
             # IconUri = ''
             # Release notes
             ReleaseNotes               = @'
+## Version 1.1.0
+- Replaced all throw statements with Write-Error and graceful return patterns to prevent script termination
+- Improved error handling: functions now return $null on failure instead of throwing
+- Added consistent ExecutionSuccess property to all result output paths
+- Stream capture results (StdOut, StdErr, Warnings, Verbose) now always present when -CaptureStreams is used (empty string instead of missing)
+- Improved parameter validation error messages with Write-Error instead of silent Write-Warning
+- Updated function descriptions and synopsis for clarity
+- Fixed WorkingDirectory parameter validation to handle empty strings properly
+- Added error result output on Add-Type compilation failure
+- Improved timeout handling to return structured error objects instead of throwing
+- Backup log file naming now uses timestamp instead of random number for easier troubleshooting
+
 ## Version 1.0.0
 - Initial release
 - Execute scriptblocks as currently logged-in user
